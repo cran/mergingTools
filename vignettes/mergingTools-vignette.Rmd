@@ -1,0 +1,236 @@
+---
+title: "mergingTools-vignette"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{mergingTools-vignette}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r}
+library(mergingTools)
+```
+
+|     HRM      |  MUCH  |
+|:-------------:|:------:|
+|  Small data collection        | Big data collection |
+|    Good performance around the anchor HEM  |   Good performance on all pairs of HEMs |
+| Use when the analysis is focused on the anchor |    Use when the analysis is focused on all HEMs |
+
+```{r include=FALSE}
+library(dplyr)
+library(purrr)
+library(DT)
+library(devtools)
+devtools::load_all()
+```
+# Tools to aid HEM analysis
+
+`mergingTools` is a package to aid the analysis of HEM readings coming from different subexperiments. A subexperiment is defined as a group reading of HEMs of the sized allowed by the PMCs of the target machine. For instance, if one needs data to fully characterize the L2 behaviour there can be of the order of 50 HEMs readings needed to do so. But, am embedded system will usually only allow a handful of HEMs to be read at once. Let us say that one can measure 5 HEMs at a time, then one would need 10 subexperiments to read all 50 HEMs. The ideal scenario is the one when we can measure all 50 HEMs together and have a single dataset with 50 variables, one for each HEM. The aim of a merging tool is to provide with an algorithm that merges the separate 10 subexperiments into one dataset, and the end result is as close as possible to the ideal scenario.
+
+The main problem is, how do we relate all 10 separate subexperiments when they are not measured at the same time? The short answer is that, if there is no information shared between the subexperiments, establishing a sensible relationship is impossible.
+That is why the way one recollect the data is important to make use of this package's tools.
+
+## On the Package
+
+This package contains two main functions to call HRM and MUCH algorithms: `HRM_merge(data, anchor_hem, n_pmcs)` and `MUCH_merge(data, n_pmcs , n_runs, n_sims, dep_lvl)`. These are the only functions you need to merge the data using one algorithm or the other. On the next sections, we will explain how every part of the algorithm works, which are the internal functions, and how to prepare the inputs necessary to perform the algorithms.
+
+## HRM
+
+One way to have common information between subexperiments is to have one HEM in common among all of them. This HEM will serve as link between all the subexperiments, and it is what we call in this package `anchor_hem`. The choice of the anchor HEM it's not arbitrary, it should be the HEM that you are most interested in analyzing. That is because, the `anchor_hem` is the one that will keep the relationship with all other HEMs the most. Once the subexperiments are merged, the values of the `anchor_hem` w.r.t. the other HEMs will be as if they were measured together. Therefore, one should choose HRM if you want to analyze the behavior of a particular HEM, e.g. `PROCESSOR_CYCLES` or `L2_MISSES`, w.r.t. all other HEMs
+
+### Collecting the data for HRM
+
+In order to apply HRM to your data, the experiments need to be carried in a particular way. For instance let's say you are interested in studying `PROCESSOR_CYCLES`. Then, in each subexperiment reading the HEM `PROCESSOR_CYCLES` should be included. So let's look at how the data should come from the experiments: 
+
+
+```{r echo=FALSE}
+# Data
+DT::datatable(data_hrm_raw_vignette,
+              extensions = 'FixedColumns',
+              options = list(scrollX = TRUE,
+              scrollCollapse = TRUE))
+
+```
+
+This data comes from the T2080 system and it allows for 6 HEMs to be read at once. On those groups of 6 HEMs, `PROCESSOR_CYCLES` was measured in all of them and it is represented by the `X1.*` label because it is measured several times. Each column with an `X1.*` represents the start of a new subexperiment. Columns 1 to 6 are subexperiment 1, columns 7 to 12 are subexperiment 2, and so on. The different subexperiments are stacked here for convenience, but keep in mind that they are not related. That is, on a given row, the value of the 1st column is not at all related to the value of the 8th column because they don't come from the same readings, even though they are put together here as if they were. 
+
+### How HRM operates
+
+Now that we clarified the format of the collected data from the HEM readings should be, let us walk step by step through the HRM algorithm.
+First, we process the names of those columns. Those numbers are the ones on the T2080 manual and the code for selecting the HEM on the code.
+What `process_raw_experiments()` does is to change the names of the columns from the code to the actual HEM name, and also it separates the dataframe into multiple dataframes, one for each subexperiment. That is why one needs to input the number of PMCs `n_pmcs` used on the subexperiments: 
+
+```{r}
+n_pmcs <- 6
+data_hrm <- mergingTools::process_raw_experiments(data = data_hrm_raw_vignette, 
+                                                  n_pmcs = n_pmcs)
+```
+
+
+```{r echo=FALSE}
+DT::datatable(data_hrm[[1]],
+              extensions = 'FixedColumns',
+              options = list(scrollX = TRUE,
+              scrollCollapse = TRUE))
+DT::datatable(data_hrm[[2]],
+              extensions = 'FixedColumns',
+              options = list(scrollX = TRUE,
+              scrollCollapse = TRUE))
+DT::datatable(data_hrm[[3]],
+              extensions = 'FixedColumns',
+              options = list(scrollX = TRUE,
+              scrollCollapse = TRUE))
+```
+
+
+Now we have three separate subexperiments containing 6 variables each, and in everyone of them there is `PROCESSOR_CYCLES`. Now, what HRM is use the statistics of order of the `anchor_hem` to relate different subexperiments. So, the assumption is that, it is sensible to relate the lowest values `PROCESSOR_CYCLES` from different subexperiments together. Therefore we match separate readings of `PROCESSOR_CYCLES` by its position on the sample, so the 5th lowest value of `PROCESSOR_CYCLES` in subexperiment 1, will be treated as the same as the 5th lowest value of `PROCESSOR_CYCLES` in subexperiment 2, and so on. To do so, we arrange each subexperiment separately based on `PROCESSOR_CYCLES`.
+
+```{r}
+anchor_hem <- "PROCESSOR_CYCLES"
+data_arranged <- data_hrm %>%
+  purrr::map(~ .x %>% arrange(!!sym(anchor_hem)))
+```
+
+
+```{r echo=FALSE}
+DT::datatable(data_arranged[[1]],
+              extensions = 'FixedColumns',
+              options = list(scrollX = TRUE,
+              scrollCollapse = TRUE))
+DT::datatable(data_arranged[[2]],
+              extensions = 'FixedColumns',
+              options = list(scrollX = TRUE,
+              scrollCollapse = TRUE))
+DT::datatable(data_arranged[[3]],
+              extensions = 'FixedColumns',
+              options = list(scrollX = TRUE,
+              scrollCollapse = TRUE))
+```
+
+After arranging, we merge and concatenate the subexperiments again into one single dataframe. 
+
+```{r message=FALSE, warning=FALSE}
+data_merged <- data_arranged %>%
+  purrr::map(~ .x %>% select(-anchor_hem)) %>%
+  purrr::reduce(cbind)
+```
+
+```{r}
+DT::datatable(data_merged,
+              extensions = 'FixedColumns',
+              options = list(scrollX = TRUE,
+              scrollCollapse = TRUE))
+```
+
+Now, those HEMs that come from different subexperiments are related under the assumption that they were measured on similar conditions. These conditions were indirectly measured by `PROCESSOR_CYCLES`. So two HEMs that were not measured together before, are now related by the reading of `PROCESSOR_CYCLES` they were paired with. 
+
+But, notice that we removed `PROCESSOR_CYCLES`. We did so because we have three separate columns with `PROCESSOR_CYCLES`, but we only want one and it is arbitrary to choose any of them instead of the others. What we do instead is to compute the distribution of the `anchor_hem` by gathering all measurements together. Then, we compute the quantiles of this distribution. The number of quantiles will be the same as the number of rows in the subexperiments. Because the quantiles are computed in a sequence ranging from 0 to 1, we can directly input the sequence of quantiles as the `PROCESSOR_CYCLES` column.
+
+
+```{r}
+anchor_data <- purrr::map(data_arranged, ~ .x %>% dplyr::select(anchor_hem)) %>%
+  unlist() %>%
+  stats::quantile(probs = seq(0, 1, length.out = nrow(data_merged)), type = 2) %>%
+  unname()
+merged_data <- cbind(anchor_data, data_merged)
+names(merged_data)[1] <- anchor_hem
+```
+
+
+```{r echo=FALSE}
+DT::datatable(merged_data,
+              extensions = 'FixedColumns',
+              options = list(scrollX = TRUE,
+              scrollCollapse = TRUE))
+```
+
+Now we have he final dataset where all subexperiments are merged. Using the main function for HRM, all the code above can be executed with:
+`HRM_merge(data = data_hrm, anchor_hem = "PROCESSOR_CYCLES", n_pmcs = 6)`
+
+
+## MUCH
+
+HRM has the virtue of being fast to apply because the gathering of the data is very simple. However, one clear flaw is that the relationships between HEMs that were not measured on the same subexperiment are not maintained. HRM works with the `anchor_hem` primarily and its the HEM that keeps the relationship with all other HEMs. But if one is interested on the relationship of every HEM one needs to put more effort. 
+
+MUCH is our proposal for a merge that is closer to the ideal scenario where all HEMs are measured simultaneously. In order to do that, the way we gather the experiments must be different. MUCH requires to have information on every pair of HEMs of the list to analyze. For instance, if we want to analyze 10 HEMs we need to construct the subexperiments so that each HEM is measured at least once with every other HEM. This makes the gathering of data much bigger than on HRM. For instance in the case of 50 HEMs with 6 PMCS, for HRM we need 10 subexperiments, whereas for HRM we need 82 subexperiments. Not only there's more data to gather, but the way of arranging the subexperiments so that every HEM is paired with every is not trivial. Still, the effort is worth it because the final merge is going to look much closer to the ideal scenario than HRM.
+
+```{r}
+# Data
+n_pmcs <- 6
+data_much <- mergingTools::process_raw_experiments(data = data_much_raw_vignette, 
+                                                  n_pmcs = n_pmcs)
+length(data_much)
+```
+
+The data is in the same format as HRM, but instead of having only 3 subexperiments now we have 24 because every HEM is measured with every other HEM at least once.
+
+So, why do we need all this data? Our assumption is that we can think of the program at analysis as a function that outputs random variables. Each HEM is a variable of the program, but we can only see a subset of them at once. But, we can construct this unknown function piece by piece. In MUCH we made the assumption to model the mean values of each HEM as a multivariate Gaussian distribution (MVGD). A MVGD needs two inputs, the vector of means and the covariance matrix. The vector of means is straightforward to compute, with the mean value of each HEM separately. The covariance matrix is the object that we must construct piece by piece.
+
+On MUCH, internally we compute the list of all the possible pairs of HEMs that we want to analyze. Then, the first step is going through this list on pair at a time, find a subexperiment where those two HEMs are measured together and compute the correlation between them. If we do this for all HEMs we will have the complete correlation matrix, which contains information about how each HEM behaves with any other HEM.
+
+
+```{r}
+# Compute the correlation matrix for all HEMs
+cor_matrix <- mergingTools::correlation_matrix(splitted_data = data_much)
+```
+
+```{r echo=FALSE}
+DT::datatable(cor_matrix ,
+              extensions = 'FixedColumns',
+              options = list(scrollX = TRUE,
+              scrollCollapse = TRUE)) %>% 
+              formatRound(columns = colnames(cor_matrix), digits=3)
+```
+
+Now that we have the correlation matrix we can transform it to the covariance matrix and construct the MVGD. But there's a problem with this matrix, there are HEMs that are highly correlated with one another and have correlation close to 1. This matrix is not invertible, and it cannot be use to construct a MVGD. Therefore, we must get rid of those variables. Do not worry about those variables, they are almost identical to another variable that has been measured and thus do not carry much meaning in the analysis. The variable `dep_lvl` indicates the degree of dependence allowed on the correlation matrix. For instance, here we put a `dep_lvl = 0.85` which means that variables with correlation bigger than 0.85 with another variable are removed. One should aim at tuning this variable as close to one as possible without making the matrix non-invertible.
+
+```{r}
+dep_lvl <- 0.85
+# Remove the HEMs which are linearly dependant on other HEMs
+cor_matrix_independent <- mergingTools::get_independent_matrix(cor_matrix = cor_matrix, dep_lvl = dep_lvl)
+```
+```{r echo=FALSE}
+DT::datatable(cor_matrix_independent ,
+              extensions = 'FixedColumns',
+              options = list(scrollX = TRUE,
+              scrollCollapse = TRUE)) %>% 
+  formatRound(columns = colnames(cor_matrix_independent), digits=3)
+```
+
+Now we have a suitable correlation matrix and we can generate the MVGD parameters:
+
+```{r}
+# Compute the parameters for the multivariate Gaussian distribution
+mvg_params <- mergingTools::generate_mvg_params(splitted_data = data_much, cor_matrix = cor_matrix_independent)
+```
+
+Once we have the covariance matrix and the means vector we can get into the next step. How are we going to use this multivariate Gaussian distribution? We will not use the output of the MVGD as the solution of the merge, because those values are not the real ones. We want to merge the data we gathered from the experiments. So we will use the MVGD as a blueprint to merge them. Suppose that we want to merge the experiments so that the final dataset contains 1000 runs for each HEM. The first step would be to simulate a MVGD of 1000 runs. Now, what this simulation is showing us, is the arrangement that the experimental data needs to have in order to preserve the correlations. You can think of it as the core structure we need to copy into the experimental data. For instance, the sample of the MVGD tells you that in order to preserve all correlations simultaneously, the 5th lowest value of HEM 1 needs to be paired with the 10th lowest value of HEM 2 and the 3rd lowest value of HEM 3, and so on. In the same way that in HRM we arranged the subexperiments based on the order statistics of the `anchor_hem`, on MUCH we arrange based on the order statistics of the sample of the MVGD. Here is laid out in this image.
+
+The colors represent the order statistics of each HEM, i.e. lighter colors represent lower values while darker colors represent higher values. Once we compute the MVGD sample, we copy the arrangement of the data into the disjointed experimental data. In the last step we have the merged experimental data with the same order structure as the MVGD sample.
+
+In the last step, we will simulate multiple MVGD and arrange the experimental based on them. Then we will keep the arrangement that preserves the correlation matrix the best.
+
+```{r}
+# Simulate several MVGD and merge best on the optimal one
+n_sims <- 100
+n_runs <- 1000
+merged_data <- mergingTools::simulate_and_merge(mvg_params = mvg_params, n_runs = n_runs, n_sims = n_sims, cor_matrix = cor_matrix_independent)
+```
+
+```{r echo=FALSE}
+DT::datatable(merged_data ,
+              extensions = 'FixedColumns',
+              options = list(scrollX = TRUE,
+              scrollCollapse = TRUE))
+```
+
+And we have again the final merged dataframe. Using the main function for MUCH, all the code above can be executed with:
+`MUCH_merge(splitted_data = data_much, n_runs = 1000, n_sims = 100, dep_lvl = 0.85)`
